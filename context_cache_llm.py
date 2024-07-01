@@ -11,69 +11,75 @@ from mlx_lm.sample_utils import top_p_sampling
 from mlx_lm.tokenizer_utils import TokenizerWrapper, load_tokenizer
 
 class ContextCachingLLM:
-    def __init__(self, model, tokenizer):
+    def __init__(self, model, tokenizer, verbose_time=False):
         self.model = model
         self.tokenizer = tokenizer
         self.cache = None
-        self.prefix_tokens = None
-        self.full_prompt_template = None
+        self.verbose_time = verbose_time
+        self.messages = []
+        self.prefix_tokens = mx.array([])
 
-    def prepare_context(self, system_prompt, document_context):
+    def prepare_context(self):
         """
-        Prepare and cache the context (system prompt and document).
+        Prepare and cache the context - whatever is in messages till now
         """
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"CONTEXT: {document_context}\nQUESTION: {{{{user_question}}}}"},
-        ]
-        self.full_prompt_template = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
+        self._update_cache()
+
+
+    def add_message(self, 
+                    message,
+                    role = "user",
+                    update_cache=False):
+        """
+        Add a user message to the context.
+        """
+        if role not in ["user", "system", "assistant"]:
+            raise ValueError("Role should be one of 'user', 'system', 'assistant'")
+        
+        self.messages.append({"role": role, "content": message})
+        if update_cache:
+            self._update_cache()
+
+    def reset_messages(self):
+        """
+        Reset the messages in the context.
+        """
+        self.messages = []
+        self.cache = None
+        self.prefix_tokens = mx.array([])
+
+    def _update_cache(self):
+        """
+        Update the KV cache with the current messages.
+        """
+        if self.cache is None:
+            kv_heads = (
+                [self.model.n_kv_heads] * len(self.model.layers)
+                if isinstance(self.model.n_kv_heads, int)
+                else self.model.n_kv_heads
+            )
+            self.cache = [KVCache(self.model.head_dim, n) for n in kv_heads]
+            
+        prefix = self.tokenizer.apply_chat_template(
+            self.messages, tokenize=False, add_generation_prompt=False
         )
-        
-        # Find the position of the placeholder
-        placeholder_position = self.full_prompt_template.find("{{user_question}}")
-        if (placeholder_position == -1):
-            raise ValueError("Placeholder {{user_question}} not found in the prompt template")
-        
-        # Get the prefix (everything before the placeholder)
-        prefix = self.full_prompt_template[:placeholder_position]
-        
         self.prefix_tokens = mx.array(self.tokenizer.encode(prefix))
-        
-        # Measure the time taken by self._process_prefix
+
         start_time = time.time()
-        self.cache = self._process_prefix(self.prefix_tokens)
+        prefix_tokens = mx.array(self.tokenizer.encode(prefix)).reshape(1, -1)
+        logits = self.model(prefix_tokens, cache=self.cache)
+        mx.eval(logits) # needed since mlx is lazy execution
         end_time = time.time()
         
         time_taken = end_time - start_time
-        print("Time taken to process prefix:", time_taken)
-        print("Prefix token length", len(self.prefix_tokens))
 
-
-    def _process_prefix(self, prefix_tokens):
-        """
-        Process the prefix tokens and return the KV cache.
-        """
-        kv_heads = (
-            [self.model.n_kv_heads] * len(self.model.layers)
-            if isinstance(self.model.n_kv_heads, int)
-            else self.model.n_kv_heads
-        )
-        cache = [KVCache(self.model.head_dim, n) for n in kv_heads]
-        
-        # Add batch dimension
-        prefix_tokens = prefix_tokens.reshape(1, -1)
-        
-        logits = self.model(prefix_tokens, cache=cache)
-
-        mx.eval(logits)
-        
-        return cache
+        if self.verbose_time:
+            # print time taken to update cache, and token length
+            print(f"Time taken to update cache: {time_taken:.3f} seconds for {len(prefix_tokens[0])} tokens.")
 
 
     def generate(
         self,
-        question: str,
         max_tokens: int = 100,
         temp: float = 0.0,
         top_p: float = 1.0,
@@ -81,18 +87,22 @@ class ContextCachingLLM:
         repetition_context_size: Optional[int] = 20,
         logit_bias: Optional[Dict[int, float]] = None,
         verbose: bool = False,
-        verbose_time: bool = False,
         formatter: Optional[Callable] = None,
     ) -> str:
         """
         Generate an answer using the cached context and the provided question.
         """
-        if self.cache is None or self.full_prompt_template is None:
+        if self.cache is None:
             raise ValueError("Context not prepared. Call prepare_context first.")
 
         # Replace the placeholder with the actual question
-        full_prompt = self.full_prompt_template.replace("{{user_question}}", question)
         
+        full_prompt = self.tokenizer.apply_chat_template(
+            self.messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+
         if not isinstance(self.tokenizer, TokenizerWrapper):
             tokenizer = TokenizerWrapper(self.tokenizer)
         else:
@@ -135,12 +145,14 @@ class ContextCachingLLM:
             if token_count == 0:
                 print("No tokens generated for this prompt")
                 return ""
-        if verbose_time:
+        if self.verbose_time:
             gen_time = time.perf_counter() - tic
             prompt_tps = prompt_tokens.size / prompt_time
             gen_tps = (token_count - 1) / gen_time
             print(f"Prompt: {prompt_tps:.3f} tokens-per-sec, {prompt_time:.3f} prompt time, {len(prompt_tokens)} tokens.")
             print(f"Generation: {gen_tps:.3f} tokens-per-sec, {gen_time:.3f} generation time, {token_count} tokens.")
+
+        self.add_message(detokenizer.text, role="assistant", update_cache=False) # cache is already updated
 
         return detokenizer.text
 

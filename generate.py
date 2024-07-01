@@ -6,17 +6,21 @@ def main():
     model, tokenizer = load("mlx-community/Meta-Llama-3-8B-Instruct-4bit")
 
     # Initialize the ContextCachingLLM
-    context_caching_llm = ContextCachingLLM(model, tokenizer)
+    llm_session = ContextCachingLLM(model, tokenizer, verbose_time=True)
 
     # Prepare the context (this can be done when the document is loaded)
     with open("large_doc.txt", "r") as f:
         doc = f.read()
     
-    system_prompt = "You are a helpful assistant. The user has selected some content from a website given as CONTEXT. Please answer the user's question. Always give a direct answer without any prefix or disclaimer."
+    system_prompt = f"""You are a helpful assistant. The user has selected some content from a website given below as CONTEXT. 
+Please answer the user's questions related to that. Some key points:
+- Always give a direct answer without any prefix or disclaimer.
+- User prefers shorter, to the point answers.
 
+CONTEXT:{doc}"""
+    
     print("Starting to prepare context...")
-    context_caching_llm.prepare_context(system_prompt, doc)
-
+    llm_session.add_message(system_prompt, role="system", update_cache=True)
     print("Context prepared.")
     
     while True:
@@ -26,7 +30,8 @@ def main():
             break
         
         # Generate the answer
-        response = context_caching_llm.generate(question, verbose_time=True, temp=0.7)
+        llm_session.add_message(question, role="user", update_cache=False)
+        response = llm_session.generate(temp=0.7)
         print("Generated response:")
         print(response)
 
