@@ -3,7 +3,10 @@ from context_cache_llm import ContextCachingLLM
 
 def main():
     # Load the model and tokenizer
-    model, tokenizer = load("mlx-community/Meta-Llama-3-8B-Instruct-4bit")
+    # model, tokenizer = load("mlx-community/Meta-Llama-3-8B-Instruct-4bit")
+    # model, tokenizer = load("mlx-community/Mistral-7B-Instruct-v0.3-4bit")
+    model, tokenizer = load("mlx-community/Qwen2-7B-Instruct-4bit")
+    # model, tokenizer = load("mlx-community/Qwen2-1.5B-4bit")
 
     # Initialize the ContextCachingLLM
     llm_session = ContextCachingLLM(model, tokenizer, verbose_time=True)
@@ -19,10 +22,19 @@ Please answer the user's questions related to that. Some key points:
 
 CONTEXT:{doc}"""
     
+#     system_prompt = f"""You are a helpful assistant. I have selected some content from a website given below as CONTEXT. 
+# Please answer the my questions related to that. Some key points:
+# - Always give a direct answer without any prefix or disclaimer.
+# - I prefer shorter, to the point answers.
+
+# CONTEXT:{doc}\n\n"""
+    
     print("Starting to prepare context...")
     llm_session.add_message(system_prompt, role="system", update_cache=True)
+    # llm_session.add_message(system_prompt, role="user", update_cache=True)
     print("Context prepared.")
     
+    turn = 0
     while True:
         # Ask the user for a question
         question = input("Enter your question (or type 'exit' to quit): ")
@@ -31,9 +43,14 @@ CONTEXT:{doc}"""
         
         # Generate the answer
         llm_session.add_message(question, role="user", update_cache=False)
+        # if turn == 0:
+        #     llm_session.add_to_last_message("QUESTION: " + question, update_cache=False)
+        # else:
+        #     llm_session.add_message(question, role="user", update_cache=False)
         response = llm_session.generate(temp=0.7)
         print("Generated response:")
         print(response)
+        turn += 1
 
 if __name__ == "__main__":
     main()

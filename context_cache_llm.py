@@ -25,7 +25,6 @@ class ContextCachingLLM:
         """
         self._update_cache()
 
-
     def add_message(self, 
                     message,
                     role = "user",
@@ -40,6 +39,16 @@ class ContextCachingLLM:
         if update_cache:
             self._update_cache()
 
+    def add_to_last_message(self, message, update_cache=False):
+        """
+        Add to the last message in the context.
+        """
+        if len(self.messages) == 0:
+            raise ValueError("No messages to add to.")
+        self.messages[-1]["content"] += message
+        if update_cache:
+            self._update_cache()
+
     def reset_messages(self):
         """
         Reset the messages in the context.
@@ -47,6 +56,7 @@ class ContextCachingLLM:
         self.messages = []
         self.cache = None
         self.prefix_tokens = mx.array([])
+        mx.metal.clear_cache()
 
     def _update_cache(self):
         """
