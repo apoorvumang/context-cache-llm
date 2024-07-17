@@ -43,13 +43,10 @@ CONTEXT:{doc}"""
         
         # Generate the answer
         llm_session.add_message(question, role="user", update_cache=False)
-        # if turn == 0:
-        #     llm_session.add_to_last_message("QUESTION: " + question, update_cache=False)
-        # else:
-        #     llm_session.add_message(question, role="user", update_cache=False)
-        response = llm_session.generate(temp=0.7)
         print("Generated response:")
-        print(response)
+        for segment in llm_session.stream_generate(temp=0.7):
+            print(segment, end="", flush=True)
+        print()
         turn += 1
 
 if __name__ == "__main__":

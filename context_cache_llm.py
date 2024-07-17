@@ -104,8 +104,6 @@ class ContextCachingLLM:
         """
         if self.cache is None:
             raise ValueError("Context not prepared. Call prepare_context first.")
-
-        # Replace the placeholder with the actual question
         
         full_prompt = self.tokenizer.apply_chat_template(
             self.messages,
@@ -165,6 +163,46 @@ class ContextCachingLLM:
         self.add_message(detokenizer.text, role="assistant", update_cache=False) # cache is already updated
 
         return detokenizer.text
+    
+
+    def stream_generate(
+        self,
+        max_tokens: int = 100,
+        **kwargs,
+    ) -> Union[str, Generator[str, None, None]]:
+        
+        if self.cache is None:
+            raise ValueError("Context not prepared. Call prepare_context first.")
+        
+        full_prompt = self.tokenizer.apply_chat_template(
+            self.messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+
+        if not isinstance(self.tokenizer, TokenizerWrapper):
+            tokenizer = TokenizerWrapper(self.tokenizer)
+        else:
+            tokenizer = self.tokenizer
+
+        prompt_tokens = mx.array(tokenizer.encode(full_prompt))
+        detokenizer = tokenizer.detokenizer
+
+        detokenizer.reset()
+        for (token, _), n in zip(
+            self._generate_step(prompt_tokens,  **kwargs),
+            range(max_tokens),
+        ):
+            if token == tokenizer.eos_token_id:
+                break
+            detokenizer.add_token(token)
+
+            # Yield the last segment if streaming
+            yield detokenizer.last_segment
+
+        detokenizer.finalize()
+        yield detokenizer.last_segment
+
 
     def _generate_step(
         self,
