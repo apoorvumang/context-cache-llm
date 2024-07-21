@@ -6,18 +6,28 @@ from typing import Any, Callable, Dict, Generator, Optional, Tuple, Union
 import time
 
 # Local imports
+from mlx_lm import load
+import mlx.core as mx
+
+from typing import Any, Callable, Dict, Generator, Optional, Tuple, Union
+import time
+
+# Local imports
 from mlx_lm.models.base import KVCache
 from mlx_lm.sample_utils import top_p_sampling
 from mlx_lm.tokenizer_utils import TokenizerWrapper, load_tokenizer
 
 class ContextCachingLLM:
-    def __init__(self, model, tokenizer, verbose_time=False):
+    def __init__(self, model, tokenizer, verbose_time=False, hidden_layer=17):
         self.model = model
         self.tokenizer = tokenizer
         self.cache = None
         self.verbose_time = verbose_time
         self.messages = []
-        self.prefix_tokens = mx.array([])
+        self.hidden_layer = hidden_layer
+        self.hidden_states = []
+        self.model.model.output_hidden_states = True
+        self.model.model.output_hidden_layer = hidden_layer
 
     def prepare_context(self):
         """
@@ -49,18 +59,28 @@ class ContextCachingLLM:
         if update_cache:
             self._update_cache()
 
+    def update_last_message(self, message, update_cache=False):
+        """
+        Update the last message in the context.
+        """
+        if len(self.messages) == 0:
+            raise ValueError("No messages to update.")
+        self.messages[-1]["content"] = message
+        if update_cache:
+            self._update_cache()
+
     def reset_messages(self):
         """
         Reset the messages in the context.
         """
         self.messages = []
         self.cache = None
-        self.prefix_tokens = mx.array([])
+        self.hidden_states = []
         mx.metal.clear_cache()
 
     def _update_cache(self):
         """
-        Update the KV cache with the current messages.
+        Update the KV cache with the current messages and store hidden states.
         """
         if self.cache is None:
             kv_heads = (
@@ -73,15 +93,18 @@ class ContextCachingLLM:
         prefix = self.tokenizer.apply_chat_template(
             self.messages, tokenize=False, add_generation_prompt=False
         )
-        self.prefix_tokens = mx.array(self.tokenizer.encode(prefix))
 
         start_time = time.time()
         prefix_tokens = mx.array(self.tokenizer.encode(prefix)).reshape(1, -1)
-        logits = self.model(prefix_tokens, cache=self.cache)
-        mx.eval(logits) # needed since mlx is lazy execution
+        logits, hidden_states = self.model(prefix_tokens, cache=self.cache,)
+        mx.eval(logits)  # needed since mlx is lazy execution
         end_time = time.time()
         
         time_taken = end_time - start_time
+
+        # Store hidden states for the specified layer
+        self.hidden_states = hidden_states
+        print("Hidden states shape: ", hidden_states.shape)
 
         if self.verbose_time:
             # print time taken to update cache, and token length
@@ -169,7 +192,7 @@ class ContextCachingLLM:
         self,
         max_tokens: int = 100,
         **kwargs,
-    ) -> Union[str, Generator[str, None, None]]:
+    ) -> Generator[Tuple[str, mx.array], None, None]:
         
         if self.cache is None:
             raise ValueError("Context not prepared. Call prepare_context first.")
@@ -189,19 +212,29 @@ class ContextCachingLLM:
         detokenizer = tokenizer.detokenizer
 
         detokenizer.reset()
-        for (token, _), n in zip(
-            self._generate_step(prompt_tokens,  **kwargs),
+        generated_hidden_states = []
+        self.add_message("", role="assistant", update_cache=False) # cache is already updated
+
+        generated_text = ""
+
+        for (token, _, token_hidden_state), n in zip(
+            self._generate_step(prompt_tokens, **kwargs),
             range(max_tokens),
         ):
             if token == tokenizer.eos_token_id:
                 break
             detokenizer.add_token(token)
-
-            # Yield the last segment if streaming
-            yield detokenizer.last_segment
+            generated_hidden_states.append(token_hidden_state)
+            
+            self.update_last_message(detokenizer.text, update_cache=False)
+            # Yield the last segment and current hidden states if streaming
+            yield detokenizer.last_segment, mx.stack(generated_hidden_states)
 
         detokenizer.finalize()
-        yield detokenizer.last_segment
+        # all_hidden_states = mx.concatenate([self.hidden_states, mx.stack(generated_hidden_states)], axis=0)
+        generated_hidden_states.append(token_hidden_state)
+        self.update_last_message(detokenizer.text, update_cache=False)
+        yield detokenizer.last_segment, mx.stack(generated_hidden_states)
 
 
     def _generate_step(
@@ -212,7 +245,7 @@ class ContextCachingLLM:
         repetition_context_size: Optional[int] = 20,
         top_p: float = 1.0,
         logit_bias: Optional[Dict[int, float]] = None,
-    ) -> Generator[Tuple[mx.array, mx.array], None, None]:
+    ) -> Generator[Tuple[mx.array, mx.array, mx.array], None, None]:
         """
         A generator producing token ids based on the given prompt from the model.
         """
@@ -234,7 +267,7 @@ class ContextCachingLLM:
             return token, logprobs
 
         y = prompt
-        start_index = self.prefix_tokens.size
+        start_index = self.cache[0].offset
 
         repetition_context = prompt[start_index:].tolist()
 
@@ -243,7 +276,7 @@ class ContextCachingLLM:
 
         def _step(y):
             nonlocal repetition_context
-            logits = self.model(y[None], cache=self.cache)
+            logits, hidden_state = self.model(y[None], cache=self.cache)
             logits = logits[:, -1, :]
 
             y, logprobs = sample(logits)
@@ -251,17 +284,17 @@ class ContextCachingLLM:
             if repetition_context_size:
                 if len(repetition_context) > repetition_context_size:
                     repetition_context = repetition_context[-repetition_context_size:]
-            return y, logprobs.squeeze(0)
+            return y, logprobs.squeeze(0), hidden_state[-1]  # Return the last token's hidden state
 
         # Process new tokens (after the prefix)
         for i in range(start_index, len(y)):
-            _, _ = _step(y[i:i+1])
+            _, _, _ = _step(y[i:i+1])
 
-        y, logprobs = _step(y[-1:])
+        y, logprobs, hidden_state = _step(y[-1:])
 
         mx.async_eval(y)
         while True:
-            next_y, next_logprobs = _step(y)
+            next_y, next_logprobs, next_hidden_state = _step(y)
             mx.async_eval(next_y)
-            yield y.item(), logprobs
-            y, logprobs = next_y, next_logprobs
+            yield y.item(), logprobs, hidden_state
+            y, logprobs, hidden_state = next_y, next_logprobs, next_hidden_state
