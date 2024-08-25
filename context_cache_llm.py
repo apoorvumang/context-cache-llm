@@ -17,6 +17,8 @@ from mlx_lm.models.base import KVCache
 from mlx_lm.sample_utils import top_p_sampling
 from mlx_lm.tokenizer_utils import TokenizerWrapper, load_tokenizer
 
+import numpy as np
+
 class ContextCachingLLM:
     def __init__(self, model, tokenizer, verbose_time=False, 
                  hidden_layer=20,
@@ -237,6 +239,7 @@ class ContextCachingLLM:
     def stream_generate(
         self,
         max_tokens: int = 100,
+        return_similarity_matrix: bool = False,
         **kwargs,
     ) -> Generator[Tuple[str, mx.array], None, None]:
         
@@ -271,14 +274,26 @@ class ContextCachingLLM:
             generated_hidden_states.append(token_hidden_state[0][-1])
             
             self.update_last_message(detokenizer.text, update_cache=False)
-            # Yield the last segment and current hidden states if streaming
+            # Yield the last segment, but not hidden state yet since we need aggregated hidden states
+            # to compute attribution
             yield detokenizer.last_segment, None
 
         detokenizer.finalize()
         # all_hidden_states = mx.concatenate([self.hidden_states, mx.stack(generated_hidden_states)], axis=0) # dunno why this here but not deleting
         generated_hidden_states.append(token_hidden_state[0][-1])
         self.update_last_message(detokenizer.text, update_cache=False)
-        yield detokenizer.last_segment, mx.stack(generated_hidden_states)
+
+        # Before we yield the last segment, we need to aggregate the hidden states
+        # and compute attribution
+        hidden_states = mx.stack(generated_hidden_states)
+        hidden_states = hidden_states[1:, :] # shift by 1 -> since generated hidden states are 1 token shifted
+        similarity_matrix = self.get_context_attribution(hidden_states)
+        attribution_segments = self.find_diagonal_segments(similarity_matrix)
+
+        if return_similarity_matrix:
+            yield detokenizer.last_segment, (similarity_matrix, attribution_segments)
+        else:
+            yield detokenizer.last_segment, attribution_segments
 
     def get_context_attribution(self, hidden_states):
         """
@@ -286,25 +301,75 @@ class ContextCachingLLM:
         Output: attribution of each token in the generated text to the context. Shape: (num_tokens, num_context_tokens)
         The attribution is calculated using the cosine similarity between the hidden states of the generated text and the context.
         """
-        # # Ensure hidden_states is a 2D array
-        # if hidden_states.ndim == 1:
-        #     hidden_states = hidden_states.reshape(1, -1)
         
         # Normalize the hidden states
         generated_norm = mx.linalg.norm(hidden_states, axis=1, keepdims=True)
         context_norm = mx.linalg.norm(self.context_hidden_states, axis=1, keepdims=True)
-
-        # print shapes of norms
-        # print(generated_norm.shape, context_norm.shape)
         
         # Compute cosine similarity
-        similarity = (hidden_states @ self.context_hidden_states.T) / (generated_norm * context_norm.T)
+        similarity_matrix = (hidden_states @ self.context_hidden_states.T) / (generated_norm * context_norm.T)
         
-        # Normalize the similarity scores
-        # attribution = mx.softmax(similarity, axis=1)
-        attribution = similarity
+        return similarity_matrix
+    
+    def find_diagonal_segments(self, similarity_matrix, anchor_threshold=0.6, expansion_threshold=0.4, max_gap=1):    
+        # Convert similarity_matrix to numpy array if it's not already
+        if not isinstance(similarity_matrix, np.ndarray):
+            similarity_matrix = np.array(similarity_matrix)
+        def expand(matrix, start, direction, threshold, max_gap):
+            i, j = start
+            path = [start]
+            gap = 0
+            di, dj = direction
+            while 0 <= i + di < matrix.shape[0] and 0 <= j + dj < matrix.shape[1]:
+                if matrix[i + di, j + dj] >= threshold:
+                    i, j = i + di, j + dj
+                    path.append((i, j))
+                    gap = 0
+                elif matrix[i + di, j] >= threshold:
+                    i = i + di
+                    path.append((i, j))
+                    gap = 0
+                elif matrix[i, j + dj] >= threshold:
+                    j = j + dj
+                    path.append((i, j))
+                    gap = 0
+                else:
+                    gap += 1
+                    if gap > max_gap:
+                        break
+                    i, j = i + di, j + dj
+                    path.append((i, j))
+            
+            # Remove trailing gap tokens
+            while path and matrix[path[-1]] < threshold:
+                path.pop()
+            
+            return path
+
+        # Step 1: Find anchor points
+        anchor_points = np.argwhere(similarity_matrix >= anchor_threshold)
         
-        return attribution
+        # Step 2: Expand each anchor point
+        segments = []
+        for anchor in anchor_points:
+            top_left_path = expand(similarity_matrix, tuple(anchor), (-1, -1), expansion_threshold, max_gap)
+            bottom_right_path = expand(similarity_matrix, tuple(anchor), (1, 1), expansion_threshold, max_gap)
+            
+            # Combine paths and calculate score
+            full_path = top_left_path[::-1][:-1] + bottom_right_path
+            score = np.mean([similarity_matrix[i, j] for i, j in full_path])
+            
+            segments.append((
+                (full_path[0][0], full_path[-1][0]),  # answer span
+                (full_path[0][1], full_path[-1][1]),  # document span
+                score
+            ))
+        
+        # Step 3: Remove duplicate spans and sort by score
+        segments = sorted(set(segments), key=lambda x: x[2], reverse=True)
+        
+        return segments
+
 
     def _generate_step(
         self,

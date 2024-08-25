@@ -6,7 +6,7 @@ import mlx.nn as nn
 
 from .base import BaseModelArgs, KVCache, create_additive_causal_mask
 
-# THIS IS HERE JUST FOR REFERENCE, SINCE ITS THE ONLY MODIFIED FILE FROM MLX-LM
+
 @dataclass
 class ModelArgs(BaseModelArgs):
     model_type: str
@@ -290,12 +290,10 @@ class LlamaModel(nn.Module):
         if cache is None:
             cache = [None] * len(self.layers)
 
-        
         for i, (layer, c) in enumerate(zip(self.layers, cache)):
             h = layer(h, mask, cache=c)
             if self.output_hidden_states and i == self.output_hidden_layer - 1:
                 hidden_states.append(h)
-                # print("~~~~~~~~~~~~~~YES ADDING HIDDEN!!")
 
         output = self.norm(h)
 
