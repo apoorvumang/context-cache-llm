@@ -12,7 +12,7 @@ def print_attribution(segments):
     print(f"Found {len(segments)} diagonal segments:")
     for i, ((answer_start, answer_end), (doc_start, doc_end), score) in enumerate(segments):
         print(f"Segment {i+1}: Answer tokens {answer_start}-{answer_end}, "
-              f"Document tokens {doc_start}-{doc_end}, "
+              f"Document characters {doc_start}-{doc_end}, "
               f"Length: {answer_end - answer_start + 1}, "
               f"Score: {score:.4f}")
 

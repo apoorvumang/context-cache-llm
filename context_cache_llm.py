@@ -288,12 +288,22 @@ class ContextCachingLLM:
         hidden_states = mx.stack(generated_hidden_states)
         hidden_states = hidden_states[1:, :] # shift by 1 -> since generated hidden states are 1 token shifted
         similarity_matrix = self.get_context_attribution(hidden_states)
-        attribution_segments = self.find_diagonal_segments(similarity_matrix)
+        token_attribution_segments = self.find_diagonal_segments(similarity_matrix)
+
+        # Convert token indices to character indices
+        char_attribution_segments = [
+            (
+                (answer_start, answer_end),
+                self.token_to_char_indices(doc_start, doc_end),
+                score
+            )
+            for (answer_start, answer_end), (doc_start, doc_end), score in token_attribution_segments
+        ]
 
         if return_similarity_matrix:
-            yield detokenizer.last_segment, (similarity_matrix, attribution_segments)
+            yield detokenizer.last_segment, (similarity_matrix, char_attribution_segments)
         else:
-            yield detokenizer.last_segment, attribution_segments
+            yield detokenizer.last_segment, char_attribution_segments
 
     def get_context_attribution(self, hidden_states):
         """
@@ -370,6 +380,12 @@ class ContextCachingLLM:
         
         return segments
 
+    def token_to_char_indices(self, token_start, token_end):
+        if token_start >= len(self.context_offset_mapping) or token_end > len(self.context_offset_mapping):
+            return None, None
+        char_start = self.context_offset_mapping[token_start][0]
+        char_end = self.context_offset_mapping[token_end - 1][1]
+        return char_start, char_end
 
     def _generate_step(
         self,
