@@ -6,6 +6,7 @@ from context_cache_llm import ContextCachingLLM
 import pdb
 import json
 from scipy.signal import convolve2d
+import json
 
 
 def print_attribution(segments):    
@@ -15,6 +16,17 @@ def print_attribution(segments):
               f"Document characters {doc_start}-{doc_end}, "
               f"Length: {answer_end - answer_start + 1}, "
               f"Score: {score:.4f}")
+        
+
+def get_attribution_json_dict(segments):
+    attribution_dict = []
+    for i, ((answer_start, answer_end), (doc_start, doc_end), score) in enumerate(segments):
+        attribution_dict.append({
+            "answer_tokens": [int(answer_start), int(answer_end)],
+            "document_chars": [int(doc_start), int(doc_end)],
+            "score": round(float(score),3)
+        })
+    return attribution_dict
 
 
 def save_attribution_data(attribution, context_text_parts, generated_text_parts, output_file):
@@ -80,13 +92,17 @@ CONTEXT:
         llm_session.add_message(question, role="user", update_cache=False)
         print("Generated response:")
         generated_text_parts = []
-        for segment, attr_output in llm_session.stream_generate(return_similarity_matrix=True,temp=0.001):
+        for segment, attr_output in llm_session.stream_generate(return_similarity_matrix=False,temp=0.001):
             print(segment, end="", flush=True)
             generated_text_parts.append(segment)
             if attr_output is not None:
-                similarity_matrix, attribution_segments = attr_output
+                # similarity_matrix, attribution_segments = attr_output
+                attribution_segments = attr_output
+                print(attribution_segments)
+                json_out = json.dumps(get_attribution_json_dict(attribution_segments))
+                print(json_out)
                 print_attribution(attribution_segments)
-                save_attribution_data(np.array(similarity_matrix), llm_session.context_text_parts, generated_text_parts[:-1], 'attribution_data.json') # last token - we don't have hidden state so no attr
+                # save_attribution_data(np.array(similarity_matrix), llm_session.context_text_parts, generated_text_parts[:-1], 'attribution_data.json') # last token - we don't have hidden state so no attr
                 
         print()
         turn += 1
